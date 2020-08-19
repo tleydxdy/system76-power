@@ -4,7 +4,6 @@ use dbus::{
 };
 use std::{
     cell::RefCell,
-    collections::HashMap,
     fs,
     rc::Rc,
     sync::{
@@ -29,8 +28,6 @@ use crate::{
 mod profiles;
 
 use self::profiles::*;
-
-const KBD_BACKLIGHT_DIR: &str = "/sys/class/leds/system76::kbd_backlight";
 
 static CONTINUE: AtomicBool = AtomicBool::new(true);
 
@@ -64,6 +61,7 @@ struct PowerDaemon {
     profile_errors:      Vec<ProfileError>,
     dbus_connection:     Arc<Connection>,
     power_switch_signal: Arc<Signal<()>>,
+    keyboard_color:      Option<String>,
 }
 
 impl PowerDaemon {
@@ -79,6 +77,7 @@ impl PowerDaemon {
             profile_errors: Vec::new(),
             power_switch_signal,
             dbus_connection,
+            keyboard_color: None,
         })
     }
 
@@ -153,30 +152,56 @@ impl Power for PowerDaemon {
         self.graphics.auto_power().map_err(err_str)
     }
 
-    fn get_keyboard_colors(&mut self) -> Result<HashMap<String, String>, String> {
-        let mut colors = HashMap::new();
-        for entry in fs::read_dir(KBD_BACKLIGHT_DIR).map_err(err_str)? {
+    fn get_keyboard_color(&mut self) -> Result<String, String> {
+        // TODO: Should be watching for color changes
+        if let Some(color) = &self.keyboard_color {
+            Ok(color.clone())
+        } else {
+            let color = get_keyboard_color_from_sys()?;
+            self.keyboard_color = Some(color.clone());
+            Ok(color)
+        }
+    }
+
+    fn set_keyboard_color(&mut self, color: &str) -> Result<(), String> {
+        // TODO: Check format of string
+        for entry in fs::read_dir("/sys/class/leds").map_err(err_str)? {
             let entry = entry.map_err(err_str)?;
             if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("color") {
-                    let color = fs::read_to_string(entry.path()).map_err(err_str)?.trim().to_string();
-                    colors.insert(name.to_string(), color);
+                if name.starts_with("system76") && name.ends_with(":kbd_backlight") {
+                    for entry in fs::read_dir(entry.path()).map_err(err_str)? {
+                        let entry = entry.map_err(err_str)?;
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name.starts_with("color") {
+                                fs::write(entry.path(), color).map_err(err_str)?;
+                            }
+                        }
+                    }
                 }
             }
         }
-        Ok(colors)
-    }
-
-    fn set_keyboard_colors(&mut self, colors: HashMap<String, String>) -> Result<(), String> {
-        for (k, v) in colors.iter() {
-            if k.contains('/') {
-                return Err(format!("Keyboard color key '{}' is invalid", k));
-            }
-            let path = format!("{}/{}", KBD_BACKLIGHT_DIR, k);
-            fs::write(path, v).map_err(err_str)?;
-        }
         Ok(())
     }
+}
+
+fn get_keyboard_color_from_sys() -> Result<String, String> {
+    for entry in fs::read_dir("/sys/class/leds").map_err(err_str)? {
+        let entry = entry.map_err(err_str)?;
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with("system76") && name.ends_with(":kbd_backlight") {
+                for entry in fs::read_dir(entry.path()).map_err(err_str)? {
+                    let entry = entry.map_err(err_str)?;
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.starts_with("color") {
+                            let color = fs::read_to_string(entry.path()).map_err(err_str)?.trim().to_string();
+                            return Ok(color);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok("ffffff".to_string())
 }
 
 pub fn daemon() -> Result<(), String> {
@@ -302,12 +327,12 @@ pub fn daemon() -> Result<(), String> {
                 )
                 .add_m(method!(auto_graphics_power, "AutoGraphicsPower", false, false))
                 .add_m(
-                    method!(get_keyboard_colors, "GetKeyboardColors", true, false)
-                        .outarg::<HashMap<String, String>, _>("colors"),
+                    method!(get_keyboard_color, "GetKeyboardColor", true, false)
+                        .outarg::<String, _>("color"),
                 )
                 .add_m(
-                    method!(set_keyboard_colors, "SetKeyboardColors", false, true)
-                        .inarg::<HashMap<String, String>, _>("colors"),
+                    method!(set_keyboard_color, "SetKeyboardColor", false, true)
+                        .inarg::<&str, _>("color"),
                 )
                 .add_s(hotplug_signal.clone())
                 .add_s(power_switch_signal.clone()),

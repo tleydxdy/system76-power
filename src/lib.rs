@@ -4,8 +4,6 @@ extern crate intel_pstate as pstate;
 #[macro_use]
 extern crate log;
 
-use std::collections::HashMap;
-
 pub mod client;
 pub mod daemon;
 pub mod disks;
@@ -43,8 +41,8 @@ pub trait Power {
     fn get_graphics_power(&mut self) -> Result<bool, String>;
     fn set_graphics_power(&mut self, power: bool) -> Result<(), String>;
     fn auto_graphics_power(&mut self) -> Result<(), String>;
-    fn get_keyboard_colors(&mut self) -> Result<HashMap<String, String>, String>;
-    fn set_keyboard_colors(&mut self, colors: HashMap<String, String>) -> Result<(), String>;
+    fn get_keyboard_color(&mut self) -> Result<String, String>;
+    fn set_keyboard_color(&mut self, color: &str) -> Result<(), String>;
 }
 
 // Helper function for errors
