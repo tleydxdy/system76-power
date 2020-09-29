@@ -90,6 +90,16 @@ impl Power for PowerClient {
         println!("setting discrete graphics to turn off when not in use");
         self.call_method::<bool>("AutoGraphicsPower", None).map(|_| ())
     }
+
+    fn get_charge(&mut self) -> Result<String, String> {
+        let m = Message::new_method_call(DBUS_NAME, DBUS_PATH, DBUS_IFACE, "GetCharge")?;
+        let r = self.bus.send_with_reply_and_block(m, TIMEOUT).map_err(err_str)?;
+        r.get1().ok_or_else(|| "return value not found".to_string())
+    }
+
+    fn set_charge(&mut self, profile: &str) -> Result<(), String> {
+        self.call_method::<&str>("SetCharge", Some(profile)).map(|_| ())
+    }
 }
 
 fn profile(client: &mut PowerClient) -> io::Result<()> {
@@ -173,6 +183,12 @@ pub fn client(subcommand: &str, matches: &ArgMatches) -> Result<(), String> {
                 println!("{}", client.get_graphics()?);
                 Ok(())
             }
+        },
+        "charging" => match matches.value_of("profile") {
+            Some("balanced") => client.set_charge("balanced"),
+            Some("capacity") => client.set_charge("capacity"),
+            Some("lifespan") => client.set_charge("lifespan"),
+            _ => client.get_charge().map_err(err_str).and(Ok(())),
         },
         _ => Err(format!("unknown sub-command {}", subcommand)),
     }

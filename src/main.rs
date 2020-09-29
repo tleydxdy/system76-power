@@ -83,6 +83,15 @@ fn main() {
                         ),
                 ),
         )
+        .subcommand(
+            SubCommand::with_name("charging")
+            .arg(
+                Arg::with_name("profile")
+                    .help("set the charging profile")
+                    .possible_values(&["capacity", "balanced", "lifespan"])
+                    .required(false),
+            )
+        )
         .get_matches();
 
     let res = match matches.subcommand() {

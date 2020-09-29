@@ -149,6 +149,41 @@ impl Power for PowerDaemon {
     fn auto_graphics_power(&mut self) -> Result<(), String> {
         self.graphics.auto_power().map_err(err_str)
     }
+
+    fn get_charge(&mut self) -> Result<String, String> {
+        // XXX check if system76 hardware (for now?)
+        const START_THRESHOLD: &str = "/sys/class/power_supply/BAT0/charge_control_start_threshold";
+        const END_THRESHOLD: &str = "/sys/class/power_supply/BAT0/charge_control_end_threshold";
+        match (fs::read_to_string(START_THRESHOLD), fs::read_to_string(END_THRESHOLD)) {
+            (Ok(start), Ok(end)) => {
+                let start = u8::from_str_radix(&start, 10).map_err(err_str)?;
+                let end = u8::from_str_radix(&end, 10).map_err(err_str)?;
+                let profile = match (start, end) {
+                    (75, 80) => "balanced",
+                    (0, 100) => "capacity",
+                    (40, 60) => "lifespan",
+                    _ => "custom",
+                };
+                Ok(profile.to_string())
+            }
+            _ => Ok("".to_string())
+        }
+    }
+
+    fn set_charge(&mut self, profile: &str) -> Result<(), String> {
+        // XXX check if system76 hardware (for now?)
+        const START_THRESHOLD: &str = "/sys/class/power_supply/BAT0/charge_control_start_threshold";
+        const END_THRESHOLD: &str = "/sys/class/power_supply/BAT0/charge_control_end_threshold";
+        let (start, end) = match profile {
+            "balanced" => (75, 80),
+            "capacity" => (0, 100),
+            "lifespan" => (40, 60),
+            _ => return Err(format!("Invalid charge profile '{}'", profile))
+        };
+        fs::write(START_THRESHOLD, format!("{}", start)).map_err(err_str)?;
+        fs::write(END_THRESHOLD, format!("{}", end)).map_err(err_str)?;
+        Ok(())
+    }
 }
 
 pub fn daemon() -> Result<(), String> {
@@ -273,6 +308,8 @@ pub fn daemon() -> Result<(), String> {
                         .inarg::<bool, _>("power"),
                 )
                 .add_m(method!(auto_graphics_power, "AutoGraphicsPower", false, false))
+                .add_m(method!(get_charge, "GetCharge", true, false).outarg::<&str, _>("profile"))
+                .add_m(method!(set_charge, "SetCharge", false, true).inarg::<&str, _>("profile"))
                 .add_s(hotplug_signal.clone())
                 .add_s(power_switch_signal.clone()),
         ),
