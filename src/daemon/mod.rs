@@ -15,6 +15,7 @@ use std::{
 };
 
 use crate::{
+    charge_thresholds::{get_charge_thresholds, set_charge_thresholds},
     err_str,
     errors::ProfileError,
     fan::FanDaemon,
@@ -23,6 +24,7 @@ use crate::{
     hotplug::HotPlugDetect,
     kernel_parameters::{KernelParameter, NmiWatchdog},
     mux::DisplayPortMux,
+    polkit,
     Power, DBUS_IFACE, DBUS_NAME, DBUS_PATH,
 };
 
@@ -150,6 +152,14 @@ impl Power for PowerDaemon {
     fn auto_graphics_power(&mut self) -> Result<(), String> {
         self.graphics.auto_power().map_err(err_str)
     }
+
+    fn get_charge_thresholds(&mut self) -> Result<(i32, i32), String> {
+        get_charge_thresholds()
+    }
+
+    fn set_charge_thresholds(&mut self, thresholds: (i32, i32)) -> Result<(), String> {
+        set_charge_thresholds(thresholds)
+    }
 }
 
 pub fn daemon() -> Result<(), String> {
@@ -274,6 +284,36 @@ pub fn daemon() -> Result<(), String> {
                         .inarg::<bool, _>("power"),
                 )
                 .add_m(method!(auto_graphics_power, "AutoGraphicsPower", false, false))
+                .add_m(method!(get_charge_thresholds, "GetChargeThresholds", true, false).outarg::<(i32, i32), _>("thresholds"))
+                .add_m({
+                    let c = c.clone();
+                    let daemon = daemon.clone();
+                    f.method("SetChargeThresholds", (), move |m| {
+                        let c = c.clone();
+                        let daemon = daemon.clone();
+
+                        let thresholds = m.msg.read1()?;
+                        let reply = m.msg.method_return();
+                        //let reply_error = m.msg.error(&"".into(), &std::ffi::CString::new("").unwrap());
+
+                        let sender = m.msg.sender().unwrap();
+                        let pid = polkit::get_connection_unix_process_id(&c, sender)?;
+
+                        thread::spawn(move || {
+                            // XXX start time
+                            let res = polkit::check_authorization(&c, pid, 0, "com.system76.powerdaemon.set-charge-thresholds");
+
+                            //println!("{:?}", reply_error);
+                            println!("{:?}", res);
+
+                            daemon.lock().unwrap().set_charge_thresholds(thresholds);
+
+                            c.send(reply);
+                        });
+
+                        Ok(vec![])
+                    }).inarg::<(i32, i32), _>("thresholds")
+                })
                 .add_s(hotplug_signal.clone())
                 .add_s(power_switch_signal.clone()),
         ),

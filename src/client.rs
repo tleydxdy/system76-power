@@ -91,6 +91,16 @@ impl Power for PowerClient {
         println!("setting discrete graphics to turn off when not in use");
         self.call_method::<bool>("AutoGraphicsPower", None).map(|_| ())
     }
+
+    fn get_charge_thresholds(&mut self) -> Result<(i32, i32), String> {
+        let m = Message::new_method_call(DBUS_NAME, DBUS_PATH, DBUS_IFACE, "GetChargeThresholds")?;
+        let r = self.bus.send_with_reply_and_block(m, Duration::from_millis(TIMEOUT)).map_err(err_str)?;
+        r.get1().ok_or_else(|| "return value not found".to_string())
+    }
+
+    fn set_charge_thresholds(&mut self, thresholds: (i32, i32)) -> Result<(), String> {
+        self.call_method::<(i32, i32)>("SetChargeThresholds", Some(thresholds)).map(|_| ())
+    }
 }
 
 fn profile(client: &mut PowerClient) -> io::Result<()> {
@@ -174,6 +184,22 @@ pub fn client(subcommand: &str, matches: &ArgMatches) -> Result<(), String> {
                 println!("{}", client.get_graphics()?);
                 Ok(())
             }
+        },
+        "charging" => match (matches.value_of("start"), matches.value_of("end")) {
+            (Some(start), Some(end)) => {
+                // XXX unwrap
+                let start = i32::from_str_radix(start, 10).map_err(err_str)?;
+                let end = i32::from_str_radix(end, 10).map_err(err_str)?;
+                client.set_charge_thresholds((start, end))?;
+                Ok(())
+            }
+            (None, None) => {
+                let (start, end) = client.get_charge_thresholds().unwrap();
+                println!("start: {}", start);
+                println!("end: {}", end);
+                Ok(())
+            }
+            _ => Ok(()),
         },
         _ => Err(format!("unknown sub-command {}", subcommand)),
     }

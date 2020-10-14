@@ -83,6 +83,19 @@ fn main() {
                         ),
                 ),
         )
+        .subcommand(
+            SubCommand::with_name("charging")
+                .arg(
+                    Arg::with_name("start")
+                        .help("Start threshold")
+                        .required(false),
+                )
+                .arg(
+                    Arg::with_name("end")
+                        .help("End threshold")
+                        .required(false),
+                ),
+        )
         .get_matches();
 
     let res = match matches.subcommand() {
