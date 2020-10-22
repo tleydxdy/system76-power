@@ -19,6 +19,7 @@ use dbus_tokio::connection;
 use std::{
     fmt::Debug,
     fs,
+    future::Future,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -130,40 +131,41 @@ impl PowerDaemon {
     }
 }
 
+#[async_trait]
 impl Power for PowerDaemon {
-    fn battery(&self) -> Result<(), String> {
+    async fn battery(&self) -> Result<(), String> {
         self.apply_profile(battery, "Battery").map_err(err_str)
     }
 
-    fn balanced(&self) -> Result<(), String> {
+    async fn balanced(&self) -> Result<(), String> {
         self.apply_profile(balanced, "Balanced").map_err(err_str)
     }
 
-    fn performance(&self) -> Result<(), String> {
+    async fn performance(&self) -> Result<(), String> {
         self.apply_profile(performance, "Performance").map_err(err_str)
     }
 
-    fn get_graphics(&self) -> Result<String, String> {
+    async fn get_graphics(&self) -> Result<String, String> {
         self.graphics.get_vendor().map_err(err_str)
     }
 
-    fn get_profile(&self) -> Result<String, String> { Ok(self.power_profile.lock().unwrap().clone()) }
+    async fn get_profile(&self) -> Result<String, String> { Ok(self.power_profile.lock().unwrap().clone()) }
 
-    fn get_switchable(&self) -> Result<bool, String> { Ok(self.graphics.can_switch()) }
+    async fn get_switchable(&self) -> Result<bool, String> { Ok(self.graphics.can_switch()) }
 
-    fn set_graphics(&self, vendor: &str) -> Result<(), String> {
+    async fn set_graphics(&self, vendor: &str) -> Result<(), String> {
         self.graphics.set_vendor(vendor).map_err(err_str)
     }
 
-    fn get_graphics_power(&self) -> Result<bool, String> {
+    async fn get_graphics_power(&self) -> Result<bool, String> {
         self.graphics.get_power().map_err(err_str)
     }
 
-    fn set_graphics_power(&self, power: bool) -> Result<(), String> {
+    async fn set_graphics_power(&self, power: bool) -> Result<(), String> {
         self.graphics.set_power(power).map_err(err_str)
     }
 
-    fn auto_graphics_power(&self) -> Result<(), String> {
+    async fn auto_graphics_power(&self) -> Result<(), String> {
         self.graphics.auto_power().map_err(err_str)
     }
 }
@@ -201,7 +203,7 @@ pub async fn daemon() -> Result<(), String> {
     };
 
     info!("Setting automatic graphics power");
-    match daemon.auto_graphics_power() {
+    match daemon.auto_graphics_power().await {
         Ok(()) => (),
         Err(err) => {
             warn!("Failed to set automatic graphics power: {}", err);
@@ -209,7 +211,7 @@ pub async fn daemon() -> Result<(), String> {
     }
 
     info!("Initializing with the balanced profile");
-    if let Err(why) = daemon.balanced() {
+    if let Err(why) = daemon.balanced().await {
         warn!("Failed to set initial profile: {}", why);
     }
     daemon.initial_set = true;
@@ -225,7 +227,8 @@ pub async fn daemon() -> Result<(), String> {
         sync_action_method(b, "Balanced", PowerDaemon::balanced);
         sync_action_method(b, "Battery", PowerDaemon::battery);
         sync_get_method(b, "GetGraphics", "vendor", PowerDaemon::get_graphics);
-        sync_set_method(b, "SetGraphics", "vendor", |d, s: String| d.set_graphics(&s));
+        // XXX
+        //sync_set_method(b, "SetGraphics", "vendor", |d, s: String| d.set_graphics(&s));
         sync_get_method(b, "GetProfile", "profile", PowerDaemon::get_profile);
         sync_get_method(b, "GetSwitchable", "switchable", PowerDaemon::get_switchable);
         sync_get_method(b, "GetGraphicsPower", "power", PowerDaemon::get_graphics_power);
@@ -288,46 +291,61 @@ pub async fn daemon() -> Result<(), String> {
     Ok(())
 }
 
-fn sync_method<IA, OA, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, input_args: IA::strs, output_args: OA::strs, f: F)
+fn sync_method<'a, IA, OA, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, input_args: IA::strs, output_args: OA::strs, f: F)
     where 
-          IA: arg::ArgAll + arg::ReadAll + Debug,
-          OA: arg::ArgAll + arg::AppendAll,
-          F: Fn(&mut PowerDaemon, IA) -> Result<OA, String> + Send + 'static
+          IA: arg::ArgAll + arg::ReadAll + Debug + Send + 'static,
+          OA: arg::ArgAll + arg::AppendAll + 'static,
+          Fut: Future<Output=Result<OA, String>> + Send + 'a,
+          F: Fn(&'a PowerDaemon, IA) -> Fut + Send + Sync + Clone + 'static
 {
-    b.method_with_cr(name, input_args, output_args, move |ctx, cr, args| {
+    b.method_with_cr_async(name, input_args, output_args, move |mut ctx, cr, args| {
         info!("DBUS Received {}{:?} method", name, args);
-        match cr.data_mut(ctx.path()) {
-            Some(daemon) => match f(daemon, args) {
-                    Ok(ret) => Ok(ret),
-                    Err(err) => Err(MethodErr::failed(&err)),
+        let daemon: Option<Arc<PowerDaemon>> = cr.data_mut(ctx.path()).cloned();
+        let f = f.clone();
+        async move {
+            let reply = match daemon {
+                Some(daemon) => {
+                    let res: Result<OA, String> = f(&daemon, args).await;
+                    match res {
+                        Ok(ret) => Ok(ret),
+                        Err(err) => Err(MethodErr::failed(&err)),
+                    }
                 }
-            None => Err(MethodErr::no_path(ctx.path()))
+                None => Err(MethodErr::no_path(ctx.path()))
+            };
+            ctx.reply(reply)
         }
     });
 }
 
 /// DBus wrapper for a method taking no argument and returning no values
-fn sync_action_method<F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, f: F)
+fn sync_action_method<'a, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, f: F)
     where 
-          F: Fn(&PowerDaemon) -> Result<(), String> + Send + 'static
+          Fut: Future<Output=Result<(), String>> + Send + 'a,
+          F: Fn(&'a PowerDaemon) -> Fut + Send + Sync + Clone + 'static
 {
     sync_method(b, name, (), (), move |d, _: ()| f(d));
 }
 
 /// DBus wrapper for method taking no arguments and returning one value
-fn sync_get_method<T, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, output_arg: &'static str, f: F)
+fn sync_get_method<'a, T, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, output_arg: &'static str, f: F)
     where 
-          T: arg::Arg + arg::Append + Debug,
-          F: Fn(&PowerDaemon) -> Result<T, String> + Send + 'static
+          T: arg::Arg + arg::Append + Debug + Send + 'static,
+          Fut: Future<Output=Result<T, String>> + Send + 'a,
+          F: Fn(&'a PowerDaemon) -> Fut + Send + Sync + Clone + 'static
 {
-    sync_method(b, name, (), (output_arg,), move |d, _: ()| f(d).map(|x| (x,)));
+    sync_method(b, name, (), (output_arg,), move |d, _: ()| {
+        let f = f.clone();
+        async move { f(d).await.map(|x| (x,)) }
+    });
 }
 
 /// DBus wrapper for method taking one argument and returning no values
-fn sync_set_method<T, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, input_arg: &'static str, f: F)
+fn sync_set_method<'a, T, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, input_arg: &'static str, f: F)
     where 
-          T: arg::Arg + for<'z> arg::Get<'z> + Debug,
-          F: Fn(&PowerDaemon, T) -> Result<(), String> + Send + 'static
+          T: arg::Arg + for<'z> arg::Get<'z> + Debug + Send + 'static,
+          Fut: Future<Output=Result<(), String>> + Send + 'a,
+          F: Fn(&'a PowerDaemon, T) -> Fut + Send + Sync + Clone + 'static
 {
     sync_method(b, name, (input_arg,), (), move |d, (arg,)| f(d, arg))
 }
