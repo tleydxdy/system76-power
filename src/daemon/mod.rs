@@ -17,6 +17,7 @@ use dbus_crossroads::{
 };
 use dbus_tokio::connection;
 use std::{
+    boxed::Box,
     fmt::Debug,
     fs,
     future::Future,
@@ -25,6 +26,7 @@ use std::{
         Arc,
         Mutex,
     },
+    pin::Pin,
     time::Duration,
     thread,
 };
@@ -129,6 +131,10 @@ impl PowerDaemon {
             Err(error_message)
         }
     }
+
+    async fn test(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -223,6 +229,7 @@ pub async fn daemon() -> Result<(), String> {
     let mut cr = Crossroads::new();
     cr.set_async_support(Some((c.clone(), Box::new(|x| { tokio::spawn(x); }))));
     let iface_token = cr.register(DBUS_IFACE, |b| {
+        sync_action_method(b, "Test", PowerDaemon::test);
         sync_action_method(b, "Performance", PowerDaemon::performance);
         sync_action_method(b, "Balanced", PowerDaemon::balanced);
         sync_action_method(b, "Battery", PowerDaemon::battery);
@@ -291,12 +298,13 @@ pub async fn daemon() -> Result<(), String> {
     Ok(())
 }
 
-fn sync_method<'a, IA, OA, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, input_args: IA::strs, output_args: OA::strs, f: F)
+type MethodFut<'a, OA> = Pin<Box<dyn Future<Output = Result<OA, String>> + Send + 'a>>;
+
+fn sync_method<IA, OA, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, input_args: IA::strs, output_args: OA::strs, f: F)
     where 
           IA: arg::ArgAll + arg::ReadAll + Debug + Send + 'static,
           OA: arg::ArgAll + arg::AppendAll + 'static,
-          Fut: Future<Output=Result<OA, String>> + Send + 'a,
-          F: Fn(&'a PowerDaemon, IA) -> Fut + Send + Sync + Clone + 'static
+          F: Fn(&PowerDaemon, IA) -> MethodFut<'_, OA> + Send + Sync + Clone + 'static
 {
     b.method_with_cr_async(name, input_args, output_args, move |mut ctx, cr, args| {
         info!("DBUS Received {}{:?} method", name, args);
@@ -305,7 +313,7 @@ fn sync_method<'a, IA, OA, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'st
         async move {
             let reply = match daemon {
                 Some(daemon) => {
-                    let res: Result<OA, String> = f(&daemon, args).await;
+                    let res: Result<OA, String> = { f(&daemon, args).await };
                     match res {
                         Ok(ret) => Ok(ret),
                         Err(err) => Err(MethodErr::failed(&err)),
@@ -319,33 +327,28 @@ fn sync_method<'a, IA, OA, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'st
 }
 
 /// DBus wrapper for a method taking no argument and returning no values
-fn sync_action_method<'a, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, f: F)
-    where 
-          Fut: Future<Output=Result<(), String>> + Send + 'a,
-          F: Fn(&'a PowerDaemon) -> Fut + Send + Sync + Clone + 'static
+fn sync_action_method<F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, f: F)
+    where F: Fn(&PowerDaemon) -> MethodFut<'_, ()> + Send + Sync + Clone + 'static
 {
-    sync_method(b, name, (), (), move |d, _: ()| f(d));
+    sync_method(b, name, (), (), move |d, _: ()| f(d) );
 }
 
 /// DBus wrapper for method taking no arguments and returning one value
-fn sync_get_method<'a, T, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, output_arg: &'static str, f: F)
-    where 
-          T: arg::Arg + arg::Append + Debug + Send + 'static,
-          Fut: Future<Output=Result<T, String>> + Send + 'a,
-          F: Fn(&'a PowerDaemon) -> Fut + Send + Sync + Clone + 'static
+fn sync_get_method<T, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, output_arg: &'static str, f: F)
+    where T: arg::Arg + arg::Append + Debug + Send + 'static,
+          F: Fn(& PowerDaemon) -> MethodFut<'_, T> + Send + Sync + Clone + 'static
 {
     sync_method(b, name, (), (output_arg,), move |d, _: ()| {
-        let f = f.clone();
-        async move { f(d).await.map(|x| (x,)) }
+        let res = f(d);
+        Box::pin(Box::new(async move { res.await.map(|x| (x,)) }))
     });
 }
 
 /// DBus wrapper for method taking one argument and returning no values
-fn sync_set_method<'a, T, Fut, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, input_arg: &'static str, f: F)
+fn sync_set_method<T, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, input_arg: &'static str, f: F)
     where 
           T: arg::Arg + for<'z> arg::Get<'z> + Debug + Send + 'static,
-          Fut: Future<Output=Result<(), String>> + Send + 'a,
-          F: Fn(&'a PowerDaemon, T) -> Fut + Send + Sync + Clone + 'static
+          F: Fn(&PowerDaemon, T) -> MethodFut<'_, ()> + Send + Sync + Clone + 'static
 {
     sync_method(b, name, (input_arg,), (), move |d, (arg,)| f(d, arg))
 }
