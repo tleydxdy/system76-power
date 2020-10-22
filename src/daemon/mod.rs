@@ -22,6 +22,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
+        Mutex,
     },
     time::Duration,
     thread,
@@ -74,8 +75,7 @@ fn pci_runtime_pm_support() -> bool { PCI_RUNTIME_PM.load(Ordering::SeqCst) }
 struct PowerDaemon {
     initial_set:         bool,
     graphics:            Graphics,
-    power_profile:       String,
-    profile_errors:      Vec<ProfileError>,
+    power_profile:       Mutex<String>,
     dbus_connection:     Arc<SyncConnection>,
 }
 
@@ -87,23 +87,26 @@ impl PowerDaemon {
         Ok(PowerDaemon {
             initial_set: false,
             graphics,
-            power_profile: String::new(),
-            profile_errors: Vec::new(),
+            power_profile: Mutex::new(String::new()),
             dbus_connection,
         })
     }
 
     fn apply_profile(
-        &mut self,
+        &self,
         func: fn(&mut Vec<ProfileError>, bool),
         name: &str,
     ) -> Result<(), String> {
-        if &self.power_profile == name {
+        let mut power_profile = self.power_profile.lock().unwrap();
+
+        if *power_profile == name {
             info!("profile was already set");
             return Ok(())
         }
 
-        func(&mut self.profile_errors, self.initial_set);
+        let mut profile_errors = Vec::new();
+
+        func(&mut profile_errors, self.initial_set);
 
         let message =
             Message::new_signal(DBUS_PATH, DBUS_NAME, "PowerProfileSwitch").unwrap().append1(name);
@@ -112,13 +115,13 @@ impl PowerDaemon {
             error!("failed to send power profile switch message");
         }
 
-        self.power_profile = name.into();
+        *power_profile = name.into();
 
-        if self.profile_errors.is_empty() {
+        if profile_errors.is_empty() {
             Ok(())
         } else {
             let mut error_message = String::from("Errors found when setting profile:");
-            for error in self.profile_errors.drain(..) {
+            for error in profile_errors.drain(..) {
                 error_message = format!("{}\n    - {}", error_message, error);
             }
 
@@ -128,39 +131,39 @@ impl PowerDaemon {
 }
 
 impl Power for PowerDaemon {
-    fn battery(&mut self) -> Result<(), String> {
+    fn battery(&self) -> Result<(), String> {
         self.apply_profile(battery, "Battery").map_err(err_str)
     }
 
-    fn balanced(&mut self) -> Result<(), String> {
+    fn balanced(&self) -> Result<(), String> {
         self.apply_profile(balanced, "Balanced").map_err(err_str)
     }
 
-    fn performance(&mut self) -> Result<(), String> {
+    fn performance(&self) -> Result<(), String> {
         self.apply_profile(performance, "Performance").map_err(err_str)
     }
 
-    fn get_graphics(&mut self) -> Result<String, String> {
+    fn get_graphics(&self) -> Result<String, String> {
         self.graphics.get_vendor().map_err(err_str)
     }
 
-    fn get_profile(&mut self) -> Result<String, String> { Ok(self.power_profile.clone()) }
+    fn get_profile(&self) -> Result<String, String> { Ok(self.power_profile.lock().unwrap().clone()) }
 
-    fn get_switchable(&mut self) -> Result<bool, String> { Ok(self.graphics.can_switch()) }
+    fn get_switchable(&self) -> Result<bool, String> { Ok(self.graphics.can_switch()) }
 
-    fn set_graphics(&mut self, vendor: &str) -> Result<(), String> {
+    fn set_graphics(&self, vendor: &str) -> Result<(), String> {
         self.graphics.set_vendor(vendor).map_err(err_str)
     }
 
-    fn get_graphics_power(&mut self) -> Result<bool, String> {
+    fn get_graphics_power(&self) -> Result<bool, String> {
         self.graphics.get_power().map_err(err_str)
     }
 
-    fn set_graphics_power(&mut self, power: bool) -> Result<(), String> {
+    fn set_graphics_power(&self, power: bool) -> Result<(), String> {
         self.graphics.set_power(power).map_err(err_str)
     }
 
-    fn auto_graphics_power(&mut self) -> Result<(), String> {
+    fn auto_graphics_power(&self) -> Result<(), String> {
         self.graphics.auto_power().map_err(err_str)
     }
 }
@@ -306,7 +309,7 @@ fn sync_method<IA, OA, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str,
 /// DBus wrapper for a method taking no argument and returning no values
 fn sync_action_method<F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, f: F)
     where 
-          F: Fn(&mut PowerDaemon) -> Result<(), String> + Send + 'static
+          F: Fn(&PowerDaemon) -> Result<(), String> + Send + 'static
 {
     sync_method(b, name, (), (), move |d, _: ()| f(d));
 }
@@ -315,7 +318,7 @@ fn sync_action_method<F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, 
 fn sync_get_method<T, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, output_arg: &'static str, f: F)
     where 
           T: arg::Arg + arg::Append + Debug,
-          F: Fn(&mut PowerDaemon) -> Result<T, String> + Send + 'static
+          F: Fn(&PowerDaemon) -> Result<T, String> + Send + 'static
 {
     sync_method(b, name, (), (output_arg,), move |d, _: ()| f(d).map(|x| (x,)));
 }
@@ -324,7 +327,7 @@ fn sync_get_method<T, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, 
 fn sync_set_method<T, F>(b: &mut IfaceBuilder<PowerDaemon>, name: &'static str, input_arg: &'static str, f: F)
     where 
           T: arg::Arg + for<'z> arg::Get<'z> + Debug,
-          F: Fn(&mut PowerDaemon, T) -> Result<(), String> + Send + 'static
+          F: Fn(&PowerDaemon, T) -> Result<(), String> + Send + 'static
 {
     sync_method(b, name, (input_arg,), (), move |d, (arg,)| f(d, arg))
 }
